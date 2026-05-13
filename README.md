@@ -3,6 +3,6 @@
 本仓库用于 GitHub Pages 静态发布。
 
 - 入口文件：`index.html`
-- 内容范围：会计视野论坛 CPA业务探讨版，2026-01-01 至 2026-05-10，chenyiwei 回复检索
-- 使用方式：打开 GitHub Pages 地址后，通过关键词、类别和排序筛选回复内容
-
+- 内容范围：会计视野论坛 CPA业务探讨版，chenyiwei 回复检索
+- 自动更新：GitHub Actions 每小时刷新最近 3 天公开答疑并自动提交到 `main`
+- 公开地址：<https://patrickusgaap-sudo.github.io/chenyiwei-reply-search/>

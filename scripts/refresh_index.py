@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from html import unescape
@@ -15,6 +17,12 @@ from urllib.parse import urlencode
 ROOT = Path(__file__).resolve().parents[1]
 INDEX_PATH = ROOT / "index.html"
 API_BASE = "https://bbs.auditdog.cn"
+API_MAX_ATTEMPTS = 4
+API_CONNECT_TIMEOUT = 10
+API_REQUEST_TIMEOUT = 60
+API_RETRY_DELAY = 5
+# Retry transport failures, but leave configuration and certificate errors visible.
+RETRYABLE_CURL_CODES = {5, 6, 7, 18, 28, 35, 52, 55, 56, 92}
 MAX_DAYS = 3
 MAX_PAGES = 3
 LOCAL_TZ = timezone(timedelta(hours=8))
@@ -32,11 +40,57 @@ class UpdateStats:
 
 def run_curl_json(path: str, params: dict[str, Any]) -> dict[str, Any]:
     url = f"{API_BASE}{path}?{urlencode(params)}"
-    raw = subprocess.check_output(
-        ["curl", "-fsSL", url],
-        text=True,
-    )
-    return json.loads(raw)
+    for attempt in range(1, API_MAX_ATTEMPTS + 1):
+        try:
+            response = subprocess.run(
+                [
+                    "curl", "-fsSL",
+                    "--connect-timeout", str(API_CONNECT_TIMEOUT),
+                    "--max-time", str(API_REQUEST_TIMEOUT),
+                    "--write-out", "\n%{http_code}",
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=API_REQUEST_TIMEOUT + 5,
+            )
+        except subprocess.TimeoutExpired:
+            reason = f"request exceeded {API_REQUEST_TIMEOUT + 5}s"
+            retryable = True
+        else:
+            raw, _, status_text = response.stdout.rpartition("\n")
+            status = int(status_text) if status_text.isdigit() else 0
+            if response.returncode == 0 and 200 <= status < 300:
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(f"Invalid JSON from {url}") from exc
+                if not isinstance(data, dict):
+                    raise RuntimeError(f"Expected a JSON object from {url}")
+                return data
+
+            reason = f"HTTP {status}, curl exit {response.returncode}"
+            if response.stderr.strip():
+                reason += f": {response.stderr.strip()}"
+            # Handle gateway errors explicitly, independent of curl's version.
+            retryable = (
+                status in {408, 429}
+                or 500 <= status < 600
+                or response.returncode in RETRYABLE_CURL_CODES
+            )
+
+        if not retryable or attempt == API_MAX_ATTEMPTS:
+            raise RuntimeError(f"Failed to fetch {url} after {attempt} attempt(s): {reason}")
+        delay = API_RETRY_DELAY * 2 ** (attempt - 1)
+        print(
+            f"Fetch attempt {attempt}/{API_MAX_ATTEMPTS} failed for {url}: "
+            f"{reason}; retrying in {delay}s",
+            file=sys.stderr,
+            flush=True,
+        )
+        time.sleep(delay)
+
+    raise RuntimeError(f"No fetch attempts configured for {url}")
 
 
 def strip_html(value: Any) -> str:
@@ -171,7 +225,9 @@ def refresh_recent_records(existing_records: list[dict[str, Any]]) -> tuple[list
     page = 1
     while page <= MAX_PAGES:
         data = run_curl_json("/api/public/recent", {"days": MAX_DAYS, "page": page})
-        for item in data.get("results", []):
+        if not isinstance(data.get("results"), list) or not isinstance(data.get("hasMore"), bool):
+            raise RuntimeError(f"Invalid recent API response on page {page}: expected results and hasMore")
+        for item in data["results"]:
             tid = thread_id_from_link(item.get("link", ""))
             if not tid:
                 continue

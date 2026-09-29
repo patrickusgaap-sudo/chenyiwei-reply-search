@@ -78,8 +78,9 @@ class RefreshIndexTests(unittest.TestCase):
         index_patch = patch.object(refresh, "INDEX_PATH", self.index_path)
         index_patch.start()
         self.addCleanup(index_patch.stop)
-        sleep_patch = patch.object(refresh.time, "sleep")
-        self.sleep = sleep_patch.start()
+        # Mock this module's clock without changing subprocess/threading's clock.
+        sleep_patch = patch.object(refresh, "time")
+        self.sleep = sleep_patch.start().sleep
         self.addCleanup(sleep_patch.stop)
 
     def assert_pages(self, requests, pages):
